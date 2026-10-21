@@ -1,0 +1,3 @@
+FROM postgres
+COPY inventory-files/ /inventory
+COPY load.sql /docker-entrypoint-initdb.d/load.sql
