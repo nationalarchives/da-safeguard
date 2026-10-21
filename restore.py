@@ -46,7 +46,7 @@ def process_result(result):
 def run(bucket):
     with psycopg2.connect(**DB) as conn:
         with conn.cursor() as cur:
-            cur.execute("select bucket, s3_key from s3_inventory bi where bucket = %s and obj_size != 0 and not exists (select 1 from s3_inventory bii where bii.s3_key = bi.s3_key and obj_size is null) group by 1,2;", (bucket,))
+            cur.execute("select vsi.bucket, vsi.s3_key from versioned_s3_inventory vsi where obj_size != 0 and vsi.is_latest and not vsi.is_delete_marker and bucket = %s;", (bucket,))
             results = cur.fetchall()
     errors = 0
     succeeded = 0
@@ -61,4 +61,4 @@ def run(bucket):
     print(f"Errors {errors}")
 
 if __name__ == "__main__":
-    run("source-das-28")
+    run(os.environ["BUCKET_NAME"])
