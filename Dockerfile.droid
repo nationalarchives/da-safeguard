@@ -4,4 +4,4 @@ RUN apk add --no-cache openjdk21-jre bash && \
     wget https://github.com/digital-preservation/droid/releases/download/6.9.14/droid-binary-6.9.14-bin.zip && \
     unzip droid-binary-6.9.14-bin.zip && \
     chown -R 1002 /droid
-CMD ["/droid/droid.sh", "-o", "/files/out.csv", "-R", "/files"]
+CMD ["/droid/droid.sh", "-Pr", "generateHash=true", "-Pr", "hashAlgorithm=sha256", "-o", "/files/out.csv", "-R", "/files"]

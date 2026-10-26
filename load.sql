@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS versioned_s3_inventory (
 	is_delete_marker bool NULL,
 	obj_size int8 NULL,
 	last_modified_date timestamptz NULL,
+    etag text NULL,
 	storage_class text NULL,
 	is_multipart_uploaded bool NULL,
 	replication_status text NULL,
