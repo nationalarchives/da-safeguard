@@ -1,4 +1,3 @@
-import datetime
 import json
 import sys
 
@@ -6,22 +5,11 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 from pathlib import Path
 import logging
-import psycopg2
 import boto3
 import os
 import signal
 from urllib.parse import unquote_plus, quote
 from threading import Lock, Event, Semaphore
-
-DB = dict(
-    host=os.environ.get("DBHOST", "pg"),
-    port=5432,
-    dbname="postgres",
-    user="postgres",
-    password="password",
-)
-
-conn = psycopg2.connect(**DB)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -31,8 +19,6 @@ logger.addHandler(handler)
 stop_requested = Event()
 
 counter_lock = Lock()
-
-processed_message_count = 0
 
 sqs = boto3.client("sqs")
 
@@ -54,14 +40,6 @@ def object_info(record):
     return key, bucket, size
 
 
-def increment_count():
-    global processed_message_count
-    with counter_lock:
-        processed_message_count += 1
-        if processed_message_count % 10 == 0:
-            logger.info("Processed %d messages", processed_message_count)
-
-
 def process_message(message, queue_url, work_dir):
     try:
         receipt_handle = message["receipt_handle"]
@@ -74,32 +52,9 @@ def process_message(message, queue_url, work_dir):
                 output_file.parent.mkdir(parents=True, exist_ok=True)
                 s3.download_file(Bucket=bucket, Key=decoded_key, Filename=output_file)
         sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
-        mark_files_downloaded(records)
-        increment_count()
 
     except Exception as e:
         logger.error("Error processing messages", e)
-
-
-def create_db_string(record):
-    key, bucket, _ = object_info(record)
-    return f"{bucket}/{quote(unquote_plus(key))}"
-
-
-def mark_files_downloaded(records):
-    with conn.cursor() as cur:
-        now = datetime.datetime.now()
-
-        updates = [
-            (
-                now,
-                create_db_string(record)
-            )
-            for record in records
-        ]
-        sql = "UPDATE safeguard_keys SET downloaded_at = %s WHERE s3_key = %s"
-        cur.executemany(sql, updates)
-        conn.commit()
 
 
 def run():
@@ -111,20 +66,20 @@ def run():
 
         while not stop_requested.is_set():
             pending = {future for future in pending if not future.done()}
+            messages = []
 
-            if len(pending) >= concurrency:
-                wait(pending, timeout=1, return_when=FIRST_COMPLETED)
-                continue
-
-            free_slots = concurrency - len(pending)
-            response = sqs.receive_message(
-                QueueUrl=queue_url,
-                MaxNumberOfMessages=min(10, free_slots),
-            )
-            messages = response.get("Messages", [])
+            while len(messages) < concurrency:
+                response = sqs.receive_message(
+                    QueueUrl=queue_url,
+                    MaxNumberOfMessages=10,
+                )
+                response_messages = response.get("Messages", [])
+                if not response_messages:
+                    continue
+                messages.extend(response_messages)
 
             if not messages:
-                stop_requested.wait(timeout=5)
+                stop_requested.wait(timeout=300)
                 continue
 
             for msg in messages:
@@ -135,6 +90,7 @@ def run():
                 pending.add(
                     pool.submit(process_message, message, queue_url, work_dir)
                 )
+            wait(pending, timeout=60 * 60 * 3)
 
 
 def main():
