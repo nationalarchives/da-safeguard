@@ -1,4 +1,5 @@
 import os
+import argparse
 from multiprocessing import Pool
 from urllib.parse import unquote
 
@@ -20,10 +21,11 @@ def process_result(result):
     errors = 0
     skipped = 0
     succeeded = 0
-    bucket, encoded_key = result
+    bucket, encoded_key, version_id = result
     key = unquote(encoded_key)
+    version = {"VersionID": version_id} if version_id else {}
     try:
-        response = s3.head_object(Bucket=bucket, Key=key)
+        response = s3.head_object(Bucket=bucket, Key=key, **version)
         if response.get("Restore") != 'ongoing-request="true"':
             s3.restore_object(
                 Bucket=bucket,
@@ -33,7 +35,7 @@ def process_result(result):
                     'GlacierJobParameters': {
                         'Tier': 'Bulk'
                     }
-                })
+                }, **version)
             succeeded = 1
         else:
             skipped = 1
@@ -43,11 +45,14 @@ def process_result(result):
 
     return {"errors": errors, "succeeded": succeeded, "skipped": skipped}
 
-def run(bucket):
+def run(bucket, prefix="", deleted=False):
     with psycopg2.connect(**DB) as conn:
         with conn.cursor() as cur:
-            cur.execute("select bucket, s3_key from s3_inventory bi where bucket = %s and obj_size != 0 and not exists (select 1 from s3_inventory bii where bii.s3_key = bi.s3_key and obj_size is null) group by 1,2;", (bucket,))
-            results = cur.fetchall()
+            if not deleted:
+                cur.execute("select vsi.bucket, vsi.s3_key, null from versioned_s3_inventory vsi where obj_size != 0 and vsi.is_latest and not vsi.is_delete_marker and bucket = %s and starts_with(vsi.s3_key, %s);", (bucket, prefix))
+            else:
+                cur.execute("select distinct on (vsi.s3_key) vsi.bucket, vsi.s3_key, vsi.version_id from versioned_s3_inventory vsi join versioned_s3_inventory marker on marker.bucket = vsi.bucket and marker.s3_key = vsi.s3_key and marker.is_latest and marker.is_delete_marker where vsi.obj_size != 0 and not vsi.is_delete_marker and vsi.bucket = %s and starts_with(vsi.s3_key, %s) order by vsi.s3_key, vsi.last_modified_date desc;", (bucket, prefix))
+                results = cur.fetchall()
     errors = 0
     succeeded = 0
     skipped = 0
@@ -60,5 +65,12 @@ def run(bucket):
     print(f"Skipped {skipped}")
     print(f"Errors {errors}")
 
+
 if __name__ == "__main__":
-    run("source-das-28")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("bucket")
+    parser.add_argument("--folder_prefix", default="")
+    parser.add_argument("--deleted", action="store_true")
+    args = parser.parse_args()
+    print(f"Bucket {args.bucket}, folder prefix {args.prefix}, deleted {args.deleted}")
+    run(args.bucket, args.prefix, args.deleted)

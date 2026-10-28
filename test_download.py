@@ -31,7 +31,7 @@ class DownloadTests(unittest.TestCase):
 
         self.assertTrue(download.stop_requested.is_set())
 
-    def test_object_info_returns_key_bucket_and_size(self):
+    def test_object_info_returns_key_bucket_size_and_no_version_id(self):
         record = {
             "s3": {
                 "object": {"key": "nested/file.txt", "size": 12},
@@ -40,7 +40,24 @@ class DownloadTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            download.object_info(record), ("nested/file.txt", "archive", 12)
+            download.object_info(record), ("nested/file.txt", "archive", 12, None)
+        )
+
+    def test_object_info_returns_version_id(self):
+        record = {
+            "s3": {
+                "object": {
+                    "key": "nested/file.txt",
+                    "size": 12,
+                    "versionId": "version-123",
+                },
+                "bucket": {"name": "archive"},
+            }
+        }
+
+        self.assertEqual(
+            download.object_info(record),
+            ("nested/file.txt", "archive", 12, "version-123"),
         )
 
     def test_process_message_acknowledges_and_marks_all_valid_records(self):
@@ -62,6 +79,33 @@ class DownloadTests(unittest.TestCase):
             Key="folder/object £.txt",
             Filename=Path(directory) / "archive/folder/object £.txt",
         )
+        _sqs.delete_message.assert_called_once_with(
+            QueueUrl="queue-url", ReceiptHandle="receipt"
+        )
+
+    def test_process_message_downloads_specified_version_for_deleted_file(self):
+        record = {
+            "s3": {
+                "object": {
+                    "key": "folder/deleted-file.txt",
+                    "size": 1,
+                    "versionId": "version-to-restore",
+                },
+                "bucket": {"name": "archive"},
+            }
+        }
+        message = {"receipt_handle": "receipt", "body": {"Records": [record]}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            download.process_message(message, "queue-url", directory)
+
+            _s3.download_file.assert_called_once_with(
+                Bucket="archive",
+                Key="folder/deleted-file.txt",
+                Filename=Path(directory) / "archive/folder/deleted-file.txt",
+                ExtraArgs={"VersionId": "version-to-restore"},
+            )
+
         _sqs.delete_message.assert_called_once_with(
             QueueUrl="queue-url", ReceiptHandle="receipt"
         )

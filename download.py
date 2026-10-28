@@ -37,7 +37,8 @@ def object_info(record):
     key = record["s3"]["object"]["key"]
     size = record["s3"]["object"]["size"]
     bucket = record["s3"]["bucket"]["name"]
-    return key, bucket, size
+    version_id = record["s3"]["object"].get("versionId")
+    return key, bucket, size, version_id
 
 
 def process_message(message, queue_url, work_dir):
@@ -45,12 +46,19 @@ def process_message(message, queue_url, work_dir):
         receipt_handle = message["receipt_handle"]
         records = message["body"]["Records"]
         for record in records:
-            key, bucket, size = object_info(record)
+            key, bucket, size, version_id = object_info(record)
             decoded_key = "/".join([unquote_plus(x) for x in key.split("/")])
             output_file = Path(work_dir) / Path(bucket) / Path(decoded_key)
             if size > 0 and  not output_file.exists():
                 output_file.parent.mkdir(parents=True, exist_ok=True)
-                s3.download_file(Bucket=bucket, Key=decoded_key, Filename=output_file)
+                download_args = {
+                    "Bucket": bucket,
+                    "Key": decoded_key,
+                    "Filename": output_file,
+                }
+                if version_id:
+                    download_args["ExtraArgs"] = {"VersionId": version_id}
+                s3.download_file(**download_args)
         sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
 
     except Exception as e:
