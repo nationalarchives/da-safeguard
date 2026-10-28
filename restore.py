@@ -1,5 +1,5 @@
 import os
-import argparse
+import sys
 from multiprocessing import Pool
 from urllib.parse import unquote
 
@@ -23,7 +23,7 @@ def process_result(result):
     succeeded = 0
     bucket, encoded_key, version_id = result
     key = unquote(encoded_key)
-    version = {"VersionID": version_id} if version_id else {}
+    version = {"VersionId": version_id} if version_id else {}
     try:
         response = s3.head_object(Bucket=bucket, Key=key, **version)
         if response.get("Restore") != 'ongoing-request="true"':
@@ -50,6 +50,7 @@ def run(bucket, prefix="", deleted=False):
         with conn.cursor() as cur:
             if not deleted:
                 cur.execute("select vsi.bucket, vsi.s3_key, null from versioned_s3_inventory vsi where obj_size != 0 and vsi.is_latest and not vsi.is_delete_marker and bucket = %s and starts_with(vsi.s3_key, %s);", (bucket, prefix))
+                results = cur.fetchall()
             else:
                 cur.execute("select distinct on (vsi.s3_key) vsi.bucket, vsi.s3_key, vsi.version_id from versioned_s3_inventory vsi join versioned_s3_inventory marker on marker.bucket = vsi.bucket and marker.s3_key = vsi.s3_key and marker.is_latest and marker.is_delete_marker where vsi.obj_size != 0 and not vsi.is_delete_marker and vsi.bucket = %s and starts_with(vsi.s3_key, %s) order by vsi.s3_key, vsi.last_modified_date desc;", (bucket, prefix))
                 results = cur.fetchall()
@@ -65,12 +66,9 @@ def run(bucket, prefix="", deleted=False):
     print(f"Skipped {skipped}")
     print(f"Errors {errors}")
 
+PREFIX = os.environ.get("PREFIX", "")
+DELETED = os.environ.get("DELETED", "").lower() == "true"
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("bucket")
-    parser.add_argument("--folder_prefix", default="")
-    parser.add_argument("--deleted", action="store_true")
-    args = parser.parse_args()
-    print(f"Bucket {args.bucket}, folder prefix {args.prefix}, deleted {args.deleted}")
-    run(args.bucket, args.prefix, args.deleted)
+    BUCKET = os.environ.get("BUCKET") or sys.argv[1]
+    run(BUCKET, PREFIX, DELETED)
