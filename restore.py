@@ -70,5 +70,5 @@ PREFIX = os.environ.get("PREFIX", "")
 DELETED = os.environ.get("DELETED", "").lower() == "true"
 
 if __name__ == "__main__":
-    BUCKET = os.environ.get("BUCKET") or sys.argv[1]
+    BUCKET = os.environ["BUCKET"]
     run(BUCKET, PREFIX, DELETED)
