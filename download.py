@@ -74,20 +74,25 @@ def run():
 
         while not stop_requested.is_set():
             pending = {future for future in pending if not future.done()}
+            available = concurrency - len(pending)
+            if not available:
+                wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                continue
+
             messages = []
 
-            while len(messages) < concurrency:
+            while len(messages) < available:
                 response = sqs.receive_message(
                     QueueUrl=queue_url,
-                    MaxNumberOfMessages=10,
+                    MaxNumberOfMessages=min(10, available - len(messages)),
+                    WaitTimeSeconds=20,
                 )
                 response_messages = response.get("Messages", [])
                 if not response_messages:
-                    continue
+                    break
                 messages.extend(response_messages)
 
             if not messages:
-                stop_requested.wait(timeout=300)
                 continue
 
             for msg in messages:
@@ -98,7 +103,6 @@ def run():
                 pending.add(
                     pool.submit(process_message, message, queue_url, work_dir)
                 )
-            wait(pending, timeout=60 * 60 * 3)
 
 
 def main():

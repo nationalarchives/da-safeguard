@@ -145,7 +145,9 @@ class DownloadTests(unittest.TestCase):
         message = {"receipt_handle": "receipt", "body": {"Records": []}}
 
         def receive(**kwargs):
-            download.stop_requested.set()
+            if receive_message.call_count == 2:
+                download.stop_requested.set()
+                return {}
             return {
                 "Messages": [
                     {"ReceiptHandle": "receipt", "Body": json.dumps(message["body"])}
@@ -166,8 +168,12 @@ class DownloadTests(unittest.TestCase):
             download.run()
 
         executor.assert_called_once_with(max_workers=3)
-        receive_message.assert_called_once_with(
-            QueueUrl="queue-url", MaxNumberOfMessages=3
+        self.assertEqual(
+            receive_message.call_args_list,
+            [
+                call(QueueUrl="queue-url", MaxNumberOfMessages=3, WaitTimeSeconds=20),
+                call(QueueUrl="queue-url", MaxNumberOfMessages=2, WaitTimeSeconds=20),
+            ],
         )
         pool.submit.assert_called_once_with(
             download.process_message, message, "queue-url", "/work"
@@ -217,8 +223,8 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(
             receive_message.call_args_list,
             [
-                call(QueueUrl="queue-url", MaxNumberOfMessages=3),
-                call(QueueUrl="queue-url", MaxNumberOfMessages=1),
+                call(QueueUrl="queue-url", MaxNumberOfMessages=3, WaitTimeSeconds=20),
+                call(QueueUrl="queue-url", MaxNumberOfMessages=1, WaitTimeSeconds=20),
             ],
         )
         self.assertEqual(wait_for_workers.call_count, 2)
@@ -257,15 +263,15 @@ class DownloadTests(unittest.TestCase):
             download.run()
 
         receive_message.assert_called_once_with(
-            QueueUrl="queue-url", MaxNumberOfMessages=10
+            QueueUrl="queue-url", MaxNumberOfMessages=10, WaitTimeSeconds=20
         )
         wait_for_workers.assert_called_once()
         self.assertEqual(pool.submit.call_count, 10)
 
     def test_run_caps_receive_batch_at_ten_and_waits_when_queue_is_empty(self):
-        def shutdown(timeout):
+        def shutdown(**kwargs):
             download.stop_requested.set()
-            return True
+            return {}
 
         with (
             patch.dict(
@@ -273,19 +279,15 @@ class DownloadTests(unittest.TestCase):
                 {"CONCURRENCY": "50", "QUEUE_URL": "queue-url", "WORK_DIR": "/work"},
             ),
             patch.object(
-                download.sqs, "receive_message", return_value={}
+                download.sqs, "receive_message", side_effect=shutdown
             ) as receive_message,
-            patch.object(
-                download.stop_requested, "wait", side_effect=shutdown
-            ) as idle_wait,
             patch.object(download, "ThreadPoolExecutor") as executor,
         ):
             download.run()
 
         receive_message.assert_called_once_with(
-            QueueUrl="queue-url", MaxNumberOfMessages=10
+            QueueUrl="queue-url", MaxNumberOfMessages=10, WaitTimeSeconds=20
         )
-        idle_wait.assert_called_once_with(timeout=5)
         executor.return_value.__enter__.return_value.submit.assert_not_called()
 
     def test_main_registers_shutdown_signals_and_runs(self):
