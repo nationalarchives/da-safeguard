@@ -167,7 +167,17 @@ class RestoreTests(unittest.TestCase):
                 self.assertFalse(restore.DELETED)
         finally:
             restore.DELETED = original_deleted
+            
+    def test_split_list_handles_commas_spaces_and_blanks(self):
+        self.assertEqual(
+            restore.split_list("sftp_user_29/, sftp_user_30/"),
+            ["sftp_user_29/", "sftp_user_30/"],
+        )
+        self.assertEqual(restore.split_list("source-das-6"), ["source-das-6"])
+        self.assertEqual(restore.split_list(""), [""])
+        self.assertEqual(restore.split_list("sftp_user_29/,"), ["sftp_user_29/"])
 
+                
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,9 +66,14 @@ def run(bucket, prefix="", deleted=False):
     print(f"Skipped {skipped}")
     print(f"Errors {errors}")
 
-PREFIX = os.environ.get("PREFIX", "")
+def split_list(text):
+    return [item.strip() for item in text.split(",") if item.strip()] or [""]
+
+PREFIXES = split_list(os.environ.get("PREFIX", ""))
 DELETED = os.environ.get("DELETED", "").lower() == "true"
 
 if __name__ == "__main__":
-    BUCKET = os.environ.get("BUCKET") or sys.argv[1]
-    run(BUCKET, PREFIX, DELETED)
+    BUCKETS = split_list(os.environ.get["BUCKET"])
+    for bucket in BUCKETS:
+        for prefix in PREFIXES:
+            run(bucket, prefix, DELETED)
