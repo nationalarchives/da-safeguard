@@ -1,5 +1,4 @@
 import os
-import sys
 from multiprocessing import Pool
 from urllib.parse import unquote
 
@@ -46,22 +45,28 @@ def process_result(result):
     return {"errors": errors, "succeeded": succeeded, "skipped": skipped}
 
 def run(bucket, prefix="", deleted=False):
-    with psycopg2.connect(**DB) as conn:
-        with conn.cursor() as cur:
-            if not deleted:
-                cur.execute("select vsi.bucket, vsi.s3_key, null from versioned_s3_inventory vsi where obj_size != 0 and vsi.is_latest and not vsi.is_delete_marker and bucket = %s and starts_with(vsi.s3_key, %s);", (bucket, prefix))
-                results = cur.fetchall()
-            else:
-                cur.execute("select distinct on (vsi.s3_key) vsi.bucket, vsi.s3_key, vsi.version_id from versioned_s3_inventory vsi join versioned_s3_inventory marker on marker.bucket = vsi.bucket and marker.s3_key = vsi.s3_key and marker.is_latest and marker.is_delete_marker where vsi.obj_size != 0 and not vsi.is_delete_marker and vsi.bucket = %s and starts_with(vsi.s3_key, %s) order by vsi.s3_key, vsi.last_modified_date desc;", (bucket, prefix))
-                results = cur.fetchall()
+    page_size = 100000
     errors = 0
     succeeded = 0
     skipped = 0
-    with Pool(100) as p:
-        results = p.map(process_result, results)
-        succeeded += sum([x["succeeded"] for x in results])
-        errors += sum([x["errors"] for x in results])
-        skipped += sum([x["skipped"] for x in results])
+    with psycopg2.connect(**DB) as conn:
+        with conn.cursor(name="restore_inventory") as cur:
+            if not deleted:
+                cur.execute("select vsi.bucket, vsi.s3_key, null from versioned_s3_inventory vsi where obj_size != 0 and vsi.is_latest and not vsi.is_delete_marker and bucket = %s and starts_with(vsi.s3_key, %s);", (bucket, prefix))
+
+            else:
+                cur.execute("select distinct on (vsi.s3_key) vsi.bucket, vsi.s3_key, vsi.version_id from versioned_s3_inventory vsi join versioned_s3_inventory marker on marker.bucket = vsi.bucket and marker.s3_key = vsi.s3_key and marker.is_latest and marker.is_delete_marker where vsi.obj_size != 0 and not vsi.is_delete_marker and vsi.bucket = %s and starts_with(vsi.s3_key, %s) order by vsi.s3_key, vsi.last_modified_date desc;", (bucket, prefix))
+            with Pool(100) as p:
+                while True:
+                    results = cur.fetchmany(page_size)
+                    if not results:
+                        break
+                    print(f"Processing {len(results)} results")
+                    results = p.map(process_result, results)
+                    succeeded += sum([x["succeeded"] for x in results])
+                    errors += sum([x["errors"] for x in results])
+                    skipped += sum([x["skipped"] for x in results])
+                    print(f"Processed {len(results)} results with {succeeded} success, {errors} errors and {skipped} skipped")
     print(f"Succeeded {succeeded}")
     print(f"Skipped {skipped}")
     print(f"Errors {errors}")
@@ -69,11 +74,12 @@ def run(bucket, prefix="", deleted=False):
 def split_list(text):
     return [item.strip() for item in text.split(",") if item.strip()] or [""]
 
+
 PREFIXES = split_list(os.environ.get("PREFIX", ""))
 DELETED = os.environ.get("DELETED", "").lower() == "true"
 
 if __name__ == "__main__":
-    BUCKETS = split_list(os.environ.get["BUCKET"])
-    for bucket in BUCKETS:
-        for prefix in PREFIXES:
-            run(bucket, prefix, DELETED)
+    bucket = os.environ["BUCKET"]
+    for prefix in PREFIXES:
+        run(bucket, prefix, DELETED)
+

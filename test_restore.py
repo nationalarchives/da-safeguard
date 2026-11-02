@@ -3,7 +3,7 @@ import importlib
 import os
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 
 _s3 = MagicMock()
@@ -93,9 +93,13 @@ class RestoreTests(unittest.TestCase):
         cursor = (
             connection.__enter__.return_value.cursor.return_value.__enter__.return_value
         )
-        cursor.fetchall.return_value = results
+        second_page = [("archive", "four", None)]
+        cursor.fetchmany.side_effect = [results, second_page, []]
         pool = MagicMock()
-        pool.__enter__.return_value.map.return_value = outcomes
+        pool.__enter__.return_value.map.side_effect = [
+            outcomes,
+            [{"errors": 0, "succeeded": 1, "skipped": 0}],
+        ]
         output = io.StringIO()
 
         with (
@@ -106,18 +110,28 @@ class RestoreTests(unittest.TestCase):
             restore.run("archive")
 
         connect.assert_called_once_with(**restore.DB)
+        connection.__enter__.return_value.cursor.assert_called_once_with(
+            name="restore_inventory"
+        )
         cursor.execute.assert_called_once_with(
             "select vsi.bucket, vsi.s3_key, null from versioned_s3_inventory vsi where obj_size != 0 and vsi.is_latest and not vsi.is_delete_marker and bucket = %s and starts_with(vsi.s3_key, %s);",
             ("archive", ""),
         )
-        self.assertEqual(cursor.fetchall.call_count, 1)
+        self.assertEqual(
+            cursor.fetchmany.call_args_list, [call(100000)] * 3
+        )
+        cursor.fetchall.assert_not_called()
         pool_factory.assert_called_once_with(100)
-        pool.__enter__.return_value.map.assert_called_once_with(
-            restore.process_result, results
+        self.assertEqual(
+            pool.__enter__.return_value.map.call_args_list,
+            [
+                call(restore.process_result, results),
+                call(restore.process_result, second_page),
+            ],
         )
         self.assertEqual(
             output.getvalue(),
-            "Succeeded 1\nSkipped 1\nErrors 1\n",
+            "Processing 3 results\nProcessed 3 results with 1 success, 1 errors and 1 skipped\nProcessing 1 results\nProcessed 1 results with 2 success, 1 errors and 1 skipped\nSucceeded 2\nSkipped 1\nErrors 1\n",
         )
 
     def test_run_deleted_queries_latest_non_delete_versions(self):
@@ -126,7 +140,7 @@ class RestoreTests(unittest.TestCase):
         cursor = (
             connection.__enter__.return_value.cursor.return_value.__enter__.return_value
         )
-        cursor.fetchall.return_value = results
+        cursor.fetchmany.side_effect = [results, []]
         pool = MagicMock()
         pool.__enter__.return_value.map.return_value = [
             {"errors": 0, "succeeded": 1, "skipped": 0}
@@ -143,10 +157,39 @@ class RestoreTests(unittest.TestCase):
             "select distinct on (vsi.s3_key) vsi.bucket, vsi.s3_key, vsi.version_id from versioned_s3_inventory vsi join versioned_s3_inventory marker on marker.bucket = vsi.bucket and marker.s3_key = vsi.s3_key and marker.is_latest and marker.is_delete_marker where vsi.obj_size != 0 and not vsi.is_delete_marker and vsi.bucket = %s and starts_with(vsi.s3_key, %s) order by vsi.s3_key, vsi.last_modified_date desc;",
             ("archive", "folder/"),
         )
-        cursor.fetchall.assert_called_once_with()
+        connection.__enter__.return_value.cursor.assert_called_once_with(
+            name="restore_inventory"
+        )
+        self.assertEqual(cursor.fetchmany.call_args_list, [call(100000)] * 2)
+        cursor.fetchall.assert_not_called()
         pool.__enter__.return_value.map.assert_called_once_with(
             restore.process_result, results
         )
+
+    def test_run_with_no_results_reports_zero_totals(self):
+        for deleted in (False, True):
+            with self.subTest(deleted=deleted):
+                connection = MagicMock()
+                cursor = (
+                    connection.__enter__.return_value.cursor.return_value
+                    .__enter__.return_value
+                )
+                cursor.fetchmany.side_effect = [[]]
+                pool = MagicMock()
+                output = io.StringIO()
+
+                with (
+                    patch.object(restore.psycopg2, "connect", return_value=connection),
+                    patch.object(restore, "Pool", return_value=pool),
+                    redirect_stdout(output),
+                ):
+                    restore.run("archive", deleted=deleted)
+
+                cursor.fetchmany.assert_called_once_with(100000)
+                pool.__enter__.return_value.map.assert_not_called()
+                self.assertEqual(
+                    output.getvalue(), "Succeeded 0\nSkipped 0\nErrors 0\n"
+                )
 
     def test_deleted_environment_variable_is_parsed_as_boolean(self):
         original_deleted = restore.DELETED

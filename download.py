@@ -49,7 +49,9 @@ def process_message(message, queue_url, work_dir):
             key, bucket, size, version_id = object_info(record)
             decoded_key = "/".join([unquote_plus(x) for x in key.split("/")])
             output_file = Path(work_dir) / Path(bucket) / Path(decoded_key)
-            if size > 0 and  not output_file.exists():
+            file_exists = output_file.exists()
+            print(f"Processing key {decoded_key} with size {size} and exists {file_exists}")
+            if size > 0 and not file_exists:
                 output_file.parent.mkdir(parents=True, exist_ok=True)
                 download_args = {
                     "Bucket": bucket,
