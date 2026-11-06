@@ -52,7 +52,7 @@ def run(bucket, prefix="", deleted=False):
     with psycopg2.connect(**DB) as conn:
         with conn.cursor(name="restore_inventory") as cur:
             if not deleted:
-                cur.execute("select vsi.bucket, vsi.s3_key, null from versioned_s3_inventory vsi where obj_size != 0 and vsi.is_latest and not vsi.is_delete_marker and bucket = %s and starts_with(vsi.s3_key, %s);", (bucket, prefix))
+                cur.execute("select vsi.bucket, vsi.s3_key, null from versioned_s3_inventory vsi where obj_size != 0 and vsi.is_latest and not vsi.is_delete_marker and bucket = %s and starts_with(vsi.s3_key, %s) and not exists (select 1 from all_source_0_files asf where replace(replace(vsi.s3_key,':','%%3A'),'*','%%2A') = replace(asf.s3_key,'~','%%7E'));", (bucket, prefix))
 
             else:
                 cur.execute("select distinct on (vsi.s3_key) vsi.bucket, vsi.s3_key, vsi.version_id from versioned_s3_inventory vsi join versioned_s3_inventory marker on marker.bucket = vsi.bucket and marker.s3_key = vsi.s3_key and marker.is_latest and marker.is_delete_marker where vsi.obj_size != 0 and not vsi.is_delete_marker and vsi.bucket = %s and starts_with(vsi.s3_key, %s) order by vsi.s3_key, vsi.last_modified_date desc;", (bucket, prefix))
