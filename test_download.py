@@ -31,7 +31,7 @@ class DownloadTests(unittest.TestCase):
 
         self.assertTrue(download.stop_requested.is_set())
 
-    def test_object_info_returns_key_bucket_and_size(self):
+    def test_object_info_returns_key_bucket_size_and_no_version_id(self):
         record = {
             "s3": {
                 "object": {"key": "nested/file.txt", "size": 12},
@@ -40,7 +40,24 @@ class DownloadTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            download.object_info(record), ("nested/file.txt", "archive", 12)
+            download.object_info(record), ("nested/file.txt", "archive", 12, None)
+        )
+
+    def test_object_info_returns_version_id(self):
+        record = {
+            "s3": {
+                "object": {
+                    "key": "nested/file.txt",
+                    "size": 12,
+                    "versionId": "version-123",
+                },
+                "bucket": {"name": "archive"},
+            }
+        }
+
+        self.assertEqual(
+            download.object_info(record),
+            ("nested/file.txt", "archive", 12, "version-123"),
         )
 
     def test_process_message_acknowledges_and_marks_all_valid_records(self):
@@ -62,6 +79,33 @@ class DownloadTests(unittest.TestCase):
             Key="folder/object £.txt",
             Filename=Path(directory) / "archive/folder/object £.txt",
         )
+        _sqs.delete_message.assert_called_once_with(
+            QueueUrl="queue-url", ReceiptHandle="receipt"
+        )
+
+    def test_process_message_downloads_specified_version_for_deleted_file(self):
+        record = {
+            "s3": {
+                "object": {
+                    "key": "folder/deleted-file.txt",
+                    "size": 1,
+                    "versionId": "version-to-restore",
+                },
+                "bucket": {"name": "archive"},
+            }
+        }
+        message = {"receipt_handle": "receipt", "body": {"Records": [record]}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            download.process_message(message, "queue-url", directory)
+
+            _s3.download_file.assert_called_once_with(
+                Bucket="archive",
+                Key="folder/deleted-file.txt",
+                Filename=Path(directory) / "archive/folder/deleted-file.txt",
+                ExtraArgs={"VersionId": "version-to-restore"},
+            )
+
         _sqs.delete_message.assert_called_once_with(
             QueueUrl="queue-url", ReceiptHandle="receipt"
         )
@@ -101,7 +145,9 @@ class DownloadTests(unittest.TestCase):
         message = {"receipt_handle": "receipt", "body": {"Records": []}}
 
         def receive(**kwargs):
-            download.stop_requested.set()
+            if receive_message.call_count == 2:
+                download.stop_requested.set()
+                return {}
             return {
                 "Messages": [
                     {"ReceiptHandle": "receipt", "Body": json.dumps(message["body"])}
@@ -122,8 +168,12 @@ class DownloadTests(unittest.TestCase):
             download.run()
 
         executor.assert_called_once_with(max_workers=3)
-        receive_message.assert_called_once_with(
-            QueueUrl="queue-url", MaxNumberOfMessages=3
+        self.assertEqual(
+            receive_message.call_args_list,
+            [
+                call(QueueUrl="queue-url", MaxNumberOfMessages=3, WaitTimeSeconds=20),
+                call(QueueUrl="queue-url", MaxNumberOfMessages=2, WaitTimeSeconds=20),
+            ],
         )
         pool.submit.assert_called_once_with(
             download.process_message, message, "queue-url", "/work"
@@ -173,8 +223,8 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(
             receive_message.call_args_list,
             [
-                call(QueueUrl="queue-url", MaxNumberOfMessages=3),
-                call(QueueUrl="queue-url", MaxNumberOfMessages=1),
+                call(QueueUrl="queue-url", MaxNumberOfMessages=3, WaitTimeSeconds=20),
+                call(QueueUrl="queue-url", MaxNumberOfMessages=1, WaitTimeSeconds=20),
             ],
         )
         self.assertEqual(wait_for_workers.call_count, 2)
@@ -213,15 +263,15 @@ class DownloadTests(unittest.TestCase):
             download.run()
 
         receive_message.assert_called_once_with(
-            QueueUrl="queue-url", MaxNumberOfMessages=10
+            QueueUrl="queue-url", MaxNumberOfMessages=10, WaitTimeSeconds=20
         )
         wait_for_workers.assert_called_once()
         self.assertEqual(pool.submit.call_count, 10)
 
     def test_run_caps_receive_batch_at_ten_and_waits_when_queue_is_empty(self):
-        def shutdown(timeout):
+        def shutdown(**kwargs):
             download.stop_requested.set()
-            return True
+            return {}
 
         with (
             patch.dict(
@@ -229,19 +279,15 @@ class DownloadTests(unittest.TestCase):
                 {"CONCURRENCY": "50", "QUEUE_URL": "queue-url", "WORK_DIR": "/work"},
             ),
             patch.object(
-                download.sqs, "receive_message", return_value={}
+                download.sqs, "receive_message", side_effect=shutdown
             ) as receive_message,
-            patch.object(
-                download.stop_requested, "wait", side_effect=shutdown
-            ) as idle_wait,
             patch.object(download, "ThreadPoolExecutor") as executor,
         ):
             download.run()
 
         receive_message.assert_called_once_with(
-            QueueUrl="queue-url", MaxNumberOfMessages=10
+            QueueUrl="queue-url", MaxNumberOfMessages=10, WaitTimeSeconds=20
         )
-        idle_wait.assert_called_once_with(timeout=5)
         executor.return_value.__enter__.return_value.submit.assert_not_called()
 
     def test_main_registers_shutdown_signals_and_runs(self):
