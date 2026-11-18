@@ -110,14 +110,8 @@ class DownloadTests(unittest.TestCase):
             QueueUrl="queue-url", ReceiptHandle="receipt"
         )
 
-    def test_process_message_skips_empty_and_already_downloaded_objects(self):
+    def test_process_message_skips_already_downloaded_objects_if_size_matches(self):
         records = [
-            {
-                "s3": {
-                    "object": {"key": "empty.txt", "size": 0},
-                    "bucket": {"name": "archive"},
-                }
-            },
             {
                 "s3": {
                     "object": {"key": "already-there.txt", "size": 10},
@@ -131,11 +125,38 @@ class DownloadTests(unittest.TestCase):
             existing_file = Path(directory) / "archive/already-there.txt"
             existing_file.parent.mkdir(parents=True)
             existing_file.touch()
-
+            existing_file.write_bytes(b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
             download.process_message(message, "queue-url", directory)
 
 
         _s3.download_file.assert_not_called()
+        _sqs.delete_message.assert_called_once_with(
+            QueueUrl="queue-url", ReceiptHandle="receipt"
+        )
+
+    def test_process_message_skips_already_downloaded_objects_if_mismatched_size_on_disk(self):
+        records = [
+            {
+                "s3": {
+                    "object": {"key": "already-there.txt", "size": 10},
+                    "bucket": {"name": "archive"},
+                }
+            },
+        ]
+        message = {"receipt_handle": "receipt", "body": {"Records": records}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            existing_file = Path(directory) / "archive/already-there.txt"
+            existing_file.parent.mkdir(parents=True)
+            existing_file.touch()
+            download.process_message(message, "queue-url", directory)
+
+        _s3.download_file.assert_called_once_with(
+            Bucket="archive",
+            Key="already-there.txt",
+            Filename=Path(directory) / "archive/already-there.txt"
+        )
+
         _sqs.delete_message.assert_called_once_with(
             QueueUrl="queue-url", ReceiptHandle="receipt"
         )
