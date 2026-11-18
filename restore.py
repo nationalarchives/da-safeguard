@@ -1,9 +1,12 @@
+import json
 import os
 from multiprocessing import Pool
-from urllib.parse import unquote
+from urllib.parse import unquote, unquote_plus
 
 import boto3
 import psycopg2
+from botocore.config import Config
+
 
 DB = dict(
     host=os.environ.get("DBHOST", "localhost"),
@@ -13,8 +16,9 @@ DB = dict(
     password="password",
 )
 
-
-s3 = boto3.client("s3")
+config = Config(region_name="eu-west-2")
+s3 = boto3.client("s3", config=config)
+sqs = boto3.client("sqs", config=config)
 
 def process_result(result):
     errors = 0
@@ -25,7 +29,7 @@ def process_result(result):
     version = {"VersionId": version_id} if version_id else {}
     try:
         response = s3.head_object(Bucket=bucket, Key=key, **version)
-        if response.get("Restore") != 'ongoing-request="true"':
+        if response.get("Restore") != 'ongoing-request="true"' and response.get("StorageClass") == "GLACIER":
             s3.restore_object(
                 Bucket=bucket,
                 Key=key,
@@ -36,6 +40,16 @@ def process_result(result):
                     }
                 }, **version)
             succeeded = 1
+        elif not response.get("StorageClass") or response.get("StorageClass") == "STANDARD":
+            message = {"Records": [
+                {
+                    "s3": {
+                        "bucket": {"name": "source-tf-safeguard"},
+                        "object": {"key": key, "size": response.get("Size", 0), "versionId": None}
+                    }
+                }
+            ]}
+            sqs.send_message(QueueUrl="https://sqs.eu-west-2.amazonaws.com/655103965971/sftp-s3-event-notification", MessageBody=json.dumps(message))
         else:
             skipped = 1
     except Exception as e:

@@ -11,6 +11,8 @@ import signal
 from urllib.parse import unquote_plus, quote
 from threading import Lock, Event, Semaphore
 
+from botocore.exceptions import ClientError
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)
@@ -50,8 +52,12 @@ def process_message(message, queue_url, work_dir):
             decoded_key = "/".join([unquote_plus(x) for x in key.split("/")])
             output_file = Path(work_dir) / Path(bucket) / Path(decoded_key)
             file_exists = output_file.exists()
-            print(f"Processing key {decoded_key} with size {size} and exists {file_exists}")
-            if size > 0 and not file_exists:
+            should_download = False
+            if not file_exists or output_file.stat().st_size != size:
+                should_download = True
+
+            print(json.dumps({"key": decoded_key, "size": size, "fileExists": file_exists, "shouldDownload": should_download}))
+            if should_download:
                 output_file.parent.mkdir(parents=True, exist_ok=True)
                 download_args = {
                     "Bucket": bucket,
@@ -60,7 +66,12 @@ def process_message(message, queue_url, work_dir):
                 }
                 if version_id:
                     download_args["ExtraArgs"] = {"VersionId": version_id}
-                s3.download_file(**download_args)
+                try:
+                    s3.download_file(**download_args)
+                except OSError:
+                    response = s3.get_object(Bucket=bucket, Key=decoded_key, VersionId=version_id)
+                    with open(output_file, "wb") as w:
+                        w.write(response["Body"].read())
         sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
 
     except Exception as e:
